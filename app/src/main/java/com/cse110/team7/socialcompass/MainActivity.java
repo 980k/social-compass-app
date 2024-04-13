@@ -2,97 +2,132 @@ package com.cse110.team7.socialcompass;
 
 import android.content.Intent;
 import android.os.Bundle;
+import android.preference.PreferenceManager;
+import android.util.Log;
 import android.view.View;
+import android.view.inputmethod.EditorInfo;
+import android.widget.Button;
+import android.widget.EditText;
 import android.widget.TextView;
 
+import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.lifecycle.ViewModelProvider;
-import androidx.recyclerview.widget.LinearLayoutManager;
-import androidx.recyclerview.widget.RecyclerView;
 
-import com.cse110.team7.socialcompass.models.House;
-import com.cse110.team7.socialcompass.ui.inputDisplayAdapter;
-import com.cse110.team7.socialcompass.ui.inputDislayViewModel;
+import com.cse110.team7.socialcompass.database.SocialCompassDatabase;
+import com.cse110.team7.socialcompass.models.LabeledLocation;
+import com.cse110.team7.socialcompass.server.LabeledLocationRepository;
+import com.cse110.team7.socialcompass.utils.Alert;
 
-
-/*
- * First page of our application; we should probably move all of this over to another activity.
- */
-import com.cse110.team7.socialcompass.utils.ShowAlert;
+import java.util.UUID;
 
 
-public class MainActivity extends AppCompatActivity {
-    public RecyclerView recyclerView;
-    inputDisplayAdapter adapter;
-    inputDislayViewModel viewModel;
+public class MainActivity extends AppCompatActivity  {
+    private EditText nameEditText;
+    private TextView uidTextView;
+    private Button okButton;
+    private LabeledLocation userLabeledLocation;
 
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
+    protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        //Tracks interactions between the UI and the database, allowing us to update values as they
-        //get changed.
-        viewModel = new ViewModelProvider(this).get(inputDislayViewModel.class);
+        nameEditText = findViewById(R.id.nameEditText);
+        uidTextView = findViewById(R.id.uidTextView);
+        okButton = findViewById(R.id.okButton);
 
-        //Creates new adapter, which does the actual updating of values.
-        adapter = new inputDisplayAdapter();
-        adapter.setHasStableIds(true);
+        var database = SocialCompassDatabase.getInstance(this);
+        var repo = new LabeledLocationRepository(database.getLabeledLocationDao());
 
-        //Binds methods to adapter
-        adapter.setCoordinatesChanged(viewModel::updateCoordinateText);
-        adapter.setParentLabelChanged(viewModel::updateLabelText);
+        var preferences = PreferenceManager.getDefaultSharedPreferences(getApplicationContext());
+        var userPublicCode = preferences.getString("userPublicCode", null);
 
-        viewModel.getHouseItems().observe(this, adapter::setHouseList);
+        if (userPublicCode != null) {
+            Log.i(MainActivity.class.getName(), "user public code exists: " + userPublicCode);
+            userLabeledLocation = repo.selectLocalLabeledLocationWithoutLiveData(userPublicCode);
 
-        //If no data is already saved, then adds three empty houses to the database.
-        viewModel.getHouseItems().observe(this, houses -> {
-            if (houses.size() == 0) {
-                viewModel.addHouse(new House("Parents", null));
-                viewModel.addHouse(new House("Friends", null));
-                viewModel.addHouse(new House("My Home", null));
+            if (userLabeledLocation != null) {
+                Log.i(MainActivity.class.getName(), "user labeled location exists");
+                nameEditText.setText(userLabeledLocation.getLabel());
+                uidTextView.setText(userLabeledLocation.getPublicCode());
             }
+        }
+
+        nameEditText.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId != EditorInfo.IME_ACTION_DONE && actionId != EditorInfo.IME_ACTION_NEXT) {
+                return false;
+            }
+
+            var label = nameEditText.getText().toString();
+            Log.i(MainActivity.class.getName(), "user modified label to " + label);
+
+            if (label.isBlank()) {
+                Log.w(MainActivity.class.getName(), "user modified label is blank");
+                Alert.show(this, "name cannot be empty!");
+                return false;
+            }
+
+            if (userLabeledLocation == null) {
+                Log.i(MainActivity.class.getName(), "generate new user labeled location");
+                userLabeledLocation = new LabeledLocation.Builder()
+                        .setPublicCode(UUID.randomUUID().toString())
+                        .setPrivateCode(UUID.randomUUID().toString())
+                        .build();
+                uidTextView.setText(userLabeledLocation.getPublicCode());
+            }
+
+            if (!userLabeledLocation.getLabel().equals(label)) {
+                Log.i(MainActivity.class.getName(), "user label is updated");
+                userLabeledLocation.setLabel(label);
+
+                Alert.show(this, "your private code is " + userLabeledLocation.getPrivateCode());
+
+                repo.syncedUpsert(userLabeledLocation);
+            }
+
+            return true;
         });
-
-        //Sets up the recycler view, so that each empty/stored label gets displayed on the UI, in the
-        //format given by label_input_format.xml
-        recyclerView = findViewById(R.id.houseInputItems);
-        recyclerView.setLayoutManager(new LinearLayoutManager(this));
-        recyclerView.setAdapter(adapter);
     }
 
-    /**
-     * On button click, only goes to CompassActivity if at least one location has been inputted.
-     */
-    public void onGoToCompass(View view) {
-
-        TextView mockOrientation = findViewById(R.id.mockOrientationView);
-        String mockOrientationStr = mockOrientation.getText().toString();
-        float orientation;
-        try {
-            orientation = Float.parseFloat(mockOrientationStr);
-            if(orientation < 0 || orientation > 359) {
-                ShowAlert.alert(this, "Please enter a number between 0-359");
-                return;
-            }
-        } catch (NumberFormatException ignored) {
-            orientation = -1;
+    public void onOkButtonClicked(View view) {
+        if (userLabeledLocation == null || userLabeledLocation.getLabel().isBlank()) {
+            Log.i(MainActivity.class.getName(), "user labeled location does not exist or label is blank");
+            Alert.show(this, "you need to input a valid user information!");
+            return;
         }
+
+        var preferences = PreferenceManager.getDefaultSharedPreferences(getApplicationContext());
+        var editor = preferences.edit();
+
+        editor.putString("userPublicCode", userLabeledLocation.getPublicCode());
+        editor.apply();
+
+        TextView mockEndpoint = findViewById(R.id.mockEndpointView);
+        String mockEndpointStr = mockEndpoint.getText().toString();
+
+        if(mockEndpointStr == null || mockEndpointStr.equals("")) {
+            mockEndpointStr = "https://socialcompass.goto.ucsd.edu/";
+        }
+
         Intent intent = new Intent(this, CompassActivity.class);
-        intent.putExtra("orientation", orientation);
+        intent.putExtra("endpoint", mockEndpointStr);
 
-        for(House i : adapter.houseList) {
-            if (i.getLocation() != null) {
-                startActivity(intent);
-                return;
-            }
-        }
-
+        startActivity(intent);
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
+    @VisibleForTesting
+    public EditText getNameEditText() {
+        return nameEditText;
     }
 
+    @VisibleForTesting
+    public TextView getUidTextView() {
+        return uidTextView;
+    }
+
+    @VisibleForTesting
+    public Button getOkButton() {
+        return okButton;
+    }
 }
